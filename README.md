@@ -19,7 +19,7 @@
 orpheus/
 ├── src/
 │   ├── server.js         本地 HTTP + WebSocket 桥接服务（Agent ←→ 插件的中间层）
-│   ├── mcp.js            MCP stdio 服务器：把 8 个工具暴露给 Agent
+│   ├── mcp.js            MCP stdio 服务器：把 10 个工具暴露给 Agent
 │   ├── tools.js          工具定义 + zod 参数校验（唯一可信的参数边界）
 │   ├── client.js         内部：MCP → 桥接服务的 HTTP 客户端
 │   ├── ensure-service.js 内部：MCP 启动时自动拉起桥接服务
@@ -76,7 +76,7 @@ printf 'y\n' | hermes mcp add orpheus \
   --connect-timeout 30
 ```
 
-> `hermes mcp add` 会问 "Enable all 8 tools? [Y/n]"，非交互环境会被取消，所以用 `printf 'y\n' |` 喂答案。
+> `hermes mcp add` 会问 "Enable all 10 tools? [Y/n]"，非交互环境会被取消，所以用 `printf 'y\n' |` 喂答案。
 
 ### Codex
 
@@ -93,18 +93,20 @@ startup_timeout_sec = 60
 
 按标准 stdio 服务器配置：命令 = `node`，参数 = `src/mcp.js` 的绝对路径。
 
-## 工具（8 个）
+## 工具（10 个）
 
 | 工具 | 作用 | 类型 |
 |---|---|---|
 | `get_player_state` | 读当前歌曲、播放状态、音量、连接能力 | 只读 |
 | `search_music` | 搜真实歌曲/歌单，返回真实 ID（点歌前先核对） | 只读 |
 | `list_my_playlists` | 读已登录账号的歌单（不改云端） | 只读 |
+| `list_charts` | 列出官方排行榜（飙升榜/新歌榜/热歌榜/原创榜…）拿 id | 只读 |
+| `play_daily` | 播放「每日推荐」歌曲（按口味每日更新） | 写·替换队列 |
 | `get_queue` | 分页读当前待播队列 | 只读 |
 | `play_song` | 立即播放指定歌曲 ID，**保留已有待播列表** | 写 |
 | `play_playlist` | 用指定歌单**替换**本地播放队列并开始播放（不改云端歌单） | 写 |
 | `enqueue` | 把歌曲 ID 追加进待播队列，不打断当前歌曲 | 写 |
-| `control_player` | pause / resume / next / previous / volume(0–100) | 写 |
+| `control_player` | pause / resume / next / previous / volume(0–100) / mode(list·single·random·order·fm·ai) | 写 |
 
 ## 安全设计
 
