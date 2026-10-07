@@ -19,7 +19,7 @@
 orpheus/
 ├── src/
 │   ├── server.js         本地 HTTP + WebSocket 桥接服务（Agent ←→ 插件的中间层）
-│   ├── mcp.js            MCP stdio 服务器：把 10 个工具暴露给 Agent
+│   ├── mcp.js            MCP stdio 服务器：把 19 个工具暴露给 Agent
 │   ├── tools.js          工具定义 + zod 参数校验（唯一可信的参数边界）
 │   ├── client.js         内部：MCP → 桥接服务的 HTTP 客户端
 │   ├── ensure-service.js 内部：MCP 启动时自动拉起桥接服务
@@ -76,7 +76,7 @@ printf 'y\n' | hermes mcp add orpheus \
   --connect-timeout 30
 ```
 
-> `hermes mcp add` 会问 "Enable all 10 tools? [Y/n]"，非交互环境会被取消，所以用 `printf 'y\n' |` 喂答案。
+> `hermes mcp add` 会问 "Enable all 19 tools? [Y/n]"，非交互环境会被取消，所以用 `printf 'y\n' |` 喂答案。
 
 ### Codex
 
@@ -93,7 +93,7 @@ startup_timeout_sec = 60
 
 按标准 stdio 服务器配置：命令 = `node`，参数 = `src/mcp.js` 的绝对路径。
 
-## 工具（10 个）
+## 工具（19 个）
 
 | 工具 | 作用 | 类型 |
 |---|---|---|
@@ -102,6 +102,15 @@ startup_timeout_sec = 60
 | `list_my_playlists` | 读已登录账号的歌单（不改云端） | 只读 |
 | `list_charts` | 列出官方排行榜（飙升榜/新歌榜/热歌榜/原创榜…）拿 id | 只读 |
 | `play_daily` | 播放「每日推荐」歌曲（按口味每日更新） | 写·替换队列 |
+| `get_lyric` | 读当前歌曲歌词（含翻译） | 只读 |
+| `like_song` | 喜欢 / 取消喜欢当前歌曲 | 写 |
+| `set_speed` | 播放速度 0.5–2.0 | 写 |
+| `set_quality` | 切换音质（标准/极高/无损/Hi-Res/音效） | 写 |
+| `blacklist` | 屏蔽当前歌曲或歌手 | 写 |
+| `create_playlist` | 新建歌单 | 写·账号 |
+| `add_to_playlist` | 把歌曲加入歌单（默认当前歌曲） | 写·账号 |
+| `remove_from_playlist` | 从歌单移除歌曲 | 写·账号 |
+| `delete_playlist` | 删除歌单（不可逆） | 写·账号 |
 | `get_queue` | 分页读当前待播队列 | 只读 |
 | `play_song` | 立即播放指定歌曲 ID，**保留已有待播列表** | 写 |
 | `play_playlist` | 用指定歌单**替换**本地播放队列并开始播放（不改云端歌单） | 写 |
@@ -118,7 +127,7 @@ startup_timeout_sec = 60
 
 ## 已知行为与限制
 
-- **点歌确认机制**：所有写操作都要等客户端回读确认目标状态，成功才返回 `verified:true`；超时返回 `TIMEOUT`，**不要自动重试写操作**，先查当前状态
+- **点歌确认机制**：只有客户端回读确认目标状态才返回 `verified:true`。屏蔽接口目前仅能确认请求被接受，返回 `accepted:true, verified:false`；喜欢操作未回读到目标状态也会明确返回 `verified:false`。超时返回 `TIMEOUT`，**不要自动重试写操作**
 - 无版权/VIP 不可播的歌返回 `UNPLAYABLE`，不会假装成功
 - `play_playlist` 会替换当前待播队列（不可逆），且受 1000 首上限约束
 - `next` / `previous` 走网易云内部 dispatch（`playingList/jump2Track`；FM 模式走 `fmPlaying/playNext|playPre`），不依赖易碎的 DOM 选择器
@@ -128,8 +137,21 @@ startup_timeout_sec = 60
 ## 测试
 
 ```bash
-npm test        # 7 个测试：鉴权、并发、超时、断线、参数校验、真实 MCP 握手
+npm test        # 鉴权、异常消息、超时并发、云端写操作模拟、时长、真实 MCP 握手
 ```
+
+## 0.1.1 可靠性与性能改进
+
+- 异常 WebSocket 消息只关闭对应连接，不再导致桥接服务退出。
+- 请求超时后保持执行锁，直到原命令结束或插件断线；避免超时后并行写入。若接口一直挂起，后续命令返回 `BUSY`，需要等待或重启网易云。
+- 每次云端写入前检查截止时间，不自动换参数重试。**已经发出的网易云请求无法撤回**，超时仍可能意味着操作已执行但未确认。
+- 歌单增删使用完整列表验证；无效响应、缺失数据、截断列表均不算成功。创建歌单只按返回的新 ID 验证；删除歌单逐页核对。
+- `ids: []` 明确报错；省略 `ids` 仍表示当前歌曲。账号歌单查询按页读取、去重后返回指定范围，兼容接口额外附带的置顶或创建歌单。
+- 播放状态 `durationMs` 统一为毫秒，增加 `pluginVersion` 便于确认加载版本。
+- API 函数按需解析并缓存，歌单读取绕过客户端结果缓存；找到所需模块即停止扫描；批量歌曲比对使用 Set；文档隐藏时跳过面板刷新，主题检测最多每 5 秒一次。
+- 工具清单由 `src/tools.js` 生成到插件，安装时自动同步；开发时运行 `npm run sync-tools`。测试会检测清单漂移。
+
+升级后需重启网易云以加载新版插件，并重启本地桥接服务；不会改变账号登录配置或配对令牌。测试使用模拟云端接口，不修改真实歌单。以上改动减少了重复扫描和比对工作，但尚未测量真实客户端 CPU/内存变化。
 
 ## 故障排查
 

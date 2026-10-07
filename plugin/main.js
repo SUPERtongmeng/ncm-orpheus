@@ -7,7 +7,7 @@
   let status='正在初始化', lastAction='尚未执行命令', lastError='', active=false, ncmVersion='';
   const panels=new Set();
   const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
-  const checkDeadline=deadline=>{if(disposed||Date.now()>deadline)throw Error('COMMAND_EXPIRED: 命令已过期，未继续操作');};
+  const checkDeadline=deadline=>{if(disposed||!Number.isFinite(deadline)||Date.now()>=deadline)throw Error('COMMAND_EXPIRED: 命令已过期，未继续操作');};
   const summary=t=>({id:String(t.id||''),name:t.name||'',artists:(t.artists||t.ar||[]).map(a=>a.name),album:(t.album||t.al||{}).name||'',durationMs:t.duration||t.dt||null});
   const playlistSummary=p=>({id:String(p.id),name:p.name,trackCount:p.trackCount,creator:p.creator?.nickname||''});
 
@@ -24,6 +24,7 @@
         helper=Object.values(req(id)).find(v=>v&&typeof v.getStore==='function'&&typeof v.getDispatch==='function');
       }
       if(source.includes('/api/cloudsearch/pc')&&source.includes('/api/v3/song/detail')){apiId=id;apiSource=source;}
+      if(helper&&apiId)break;
     }
     if(!helper||!apiId)throw Error('UNSUPPORTED_CLIENT: 未找到播放器或搜索接口');
     const state=()=>helper.getStore();
@@ -40,12 +41,26 @@
       if(typeof fn!=='function')throw Error('UNSUPPORTED_API_EXPORT: '+path);
       return fn;
     }
-    const api={search:endpoint('/api/cloudsearch/pc'),details:endpoint('/api/v3/song/detail'),playlist:endpoint('/api/v6/playlist/detail'),mine:endpoint('/api/user/playlist'),charts:endpoint('/api/toplist/detail/v2'),daily:endpoint('/api/v3/discovery/recommend/songs')};
+    const rawCache=new Map();
+    function rawApi(path){
+      if(rawCache.has(path))return rawCache.get(path);
+      const esc=path.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+      const m=apiSource.match(new RegExp('Object\\((\\w+)\\.(\\w+)\\)\\((?:\\{[^{}]*url:)?\\s*"'+esc+'"'));
+      if(!m)throw Error('UNSUPPORTED_API: '+path);
+      const decl=apiSource.match(new RegExp('[,;]\\s*'+m[1]+'\\s*=\\s*n\\((\\d+)\\)'));
+      if(!decl)throw Error('UNSUPPORTED_API_FACTORY: '+m[1]);
+      const factory=req(+decl[1])?.[m[2]];
+      if(typeof factory!=='function')throw Error('UNSUPPORTED_API_FACTORY: '+m[1]+'.'+m[2]);
+      const fn=factory(path);rawCache.set(path,fn);return fn;
+    }
+
+    const lazyEndpoint=path=>{let fn;return (...args)=>(fn||(fn=endpoint(path)))(...args);};
+    const api={search:lazyEndpoint('/api/cloudsearch/pc'),details:lazyEndpoint('/api/v3/song/detail'),playlist:(...args)=>rawApi('/api/v6/playlist/detail')(...args),mine:(...args)=>rawApi('/api/user/playlist')(...args),charts:lazyEndpoint('/api/toplist/detail/v2'),daily:lazyEndpoint('/api/v3/discovery/recommend/songs'),create:lazyEndpoint('/api/playlist/create'),del:lazyEndpoint('/api/playlist/delete'),manipulate:lazyEndpoint('/api/v1/playlist/manipulate/tracks')};
     const dispatch=(type,payload={})=>helper.getDispatch()({type,payload});
     function player(){
       const p=state().playing;
       if(!p)throw Error('PLAYER_NOT_READY');
-      return {id:String(p.resourceTrackId||''),name:p.resourceName||'',artists:(p.resourceArtists||[]).map(a=>a.name),playing:p.playingState===2,state:({0:'stopped',1:'paused',2:'playing','-1':'ended'})[p.playingState]||'unknown',volume:Math.round((p.playingVolume||0)*100),mode:p.playingMode,durationMs:p.resourceDuration||null,trial:!!p.resourceIsTryType,observedAt:new Date().toISOString()};
+      return {id:String(p.resourceTrackId||''),name:p.resourceName||'',artists:(p.resourceArtists||[]).map(a=>a.name),playing:p.playingState===2,state:({0:'stopped',1:'paused',2:'playing','-1':'ended'})[p.playingState]||'unknown',volume:Math.round((p.playingVolume||0)*100),mode:p.playingMode,speed:p.playingSpeed||1,quality:p.resourcePlayingQuality||null,durationMs:Number.isFinite(p.resourceDuration)?Math.round(p.resourceDuration*1000):null,trial:!!p.resourceIsTryType,observedAt:new Date().toISOString()};
     }
     function queue(){
       const s=state();
@@ -68,9 +83,18 @@
         options:{clear,play,playId:playId||items[0]?.id},triggerScene:'playingList',
       });
     }
+    function requireSuccess(r,action){
+      if(!r||r.code!==200)throw Error(action+'_NOT_CONFIRMED: '+(r?.code??'INVALID_RESPONSE')+'；不要自动重试写操作');
+    }
+    function playlistIds(d){
+      if(!d||(d.code!==undefined&&d.code!==200)||!d.playlist)throw Error('BAD_PLAYLIST_RESPONSE');
+      const p=d.playlist,items=p.trackIds||p.tracks;
+      if(!Array.isArray(items)||items.some(t=>!t||!t.id)||!Number.isInteger(p.trackCount)||p.trackCount!==items.length)throw Error('INCOMPLETE_PLAYLIST: 无法确认完整歌曲列表');
+      return items.map(t=>String(t.id));
+    }
     async function execute(name,args,deadline){
       checkDeadline(deadline);
-      if(name==='get_player_state')return {connected:true,clientVersion:betterncm.ncm.getNCMVersion(),...player(),capabilities:['get_player_state','search_music','list_my_playlists','play_song','play_playlist','get_queue','enqueue','control_player','list_charts','play_daily']};
+      if(name==='get_player_state')return {connected:true,pluginVersion:'0.1.1',clientVersion:betterncm.ncm.getNCMVersion(),...player(),capabilities:TOOL_NAMES};
       if(name==='search_music'){
         const r=await api.search({s:args.query,type:args.type==='playlist'?1000:1,limit:args.limit,offset:0});
         if(r.code&&r.code!==200)throw Error('SEARCH_FAILED: '+r.code);
@@ -79,9 +103,19 @@
       }
       if(name==='list_my_playlists'){
         const uid=state().host?.uid;if(!uid)throw Error('LOGIN_REQUIRED');
-        const r=await api.mine({uid,limit:1000,offset:0});
-        if(!Array.isArray(r.playlist))throw Error('BAD_PLAYLIST_RESPONSE');
-        return {items:r.playlist.slice(args.offset,args.offset+args.limit).map(playlistSummary),more:!!r.more||r.playlist.length>args.offset+args.limit,offset:args.offset};
+        const items=[],seen=new Set();let more=false;
+        // NCM may include extra created/pinned playlists regardless of the requested limit.
+        for(let offset=0;;offset+=1000){
+          checkDeadline(deadline);
+          const r=await api.mine({uid,limit:1000,offset});
+          if(!r||(r.code!==undefined&&r.code!==200)||!Array.isArray(r.playlist))throw Error('BAD_PLAYLIST_RESPONSE');
+          const before=items.length;
+          for(const p of r.playlist){const id=String(p.id);if(!seen.has(id)){seen.add(id);items.push(p);}}
+          more=r.more===true||(r.more===undefined&&r.playlist.length>=1000);
+          if(!more||items.length>=args.offset+args.limit)break;
+          if(items.length===before||offset>=99000)throw Error('INCOMPLETE_PLAYLIST_PAGE');
+        }
+        return {items:items.slice(args.offset,args.offset+args.limit).map(playlistSummary),more:more||items.length>args.offset+args.limit,offset:args.offset};
       }
       if(name==='list_charts'){
         const r=await api.charts({});
@@ -89,7 +123,7 @@
         const out=[];const collect=x=>{if(Array.isArray(x)){if(x.length&&x.every(isChart)){for(const c of x)out.push(c);return;}for(const v of x)collect(v);return;}if(x&&typeof x==='object'){for(const k in x)collect(x[k]);}};
         collect(r);
         const seen=new Set();const list=out.filter(c=>{const k=String(c.id);if(!k||k==='0'||seen.has(k))return false;seen.add(k);return true;});
-        if(!list){const first=Array.isArray(r&&r.list)?r.list[0]:null;throw Error('BAD_CHART_RESPONSE firstKeys='+(first?JSON.stringify(Object.keys(first)).slice(0,200):'n/a')+' topKeys='+(r&&typeof r==='object'?JSON.stringify(Object.keys(r)).slice(0,120):typeof r));}
+        if(!list.length){const first=Array.isArray(r&&r.list)?r.list[0]:null;throw Error('BAD_CHART_RESPONSE firstKeys='+(first?JSON.stringify(Object.keys(first)).slice(0,200):'n/a')+' topKeys='+(r&&typeof r==='object'?JSON.stringify(Object.keys(r)).slice(0,120):typeof r));}
         return {items:list.map(c=>({id:String(c.id),name:c.name||c.title||'',frequency:c.updateFrequency||'',updatedAt:c.trackNumberUpdateTime||c.updateTime||null})),total:list.length};
       }
       if(name==='get_queue')return {items:queue().slice(args.offset,args.offset+args.limit).map(q=>summary(q.track||q)),total:queue().length,mode:player().mode,offset:args.offset};
@@ -159,25 +193,124 @@
         const observed=await waitFor(()=>player().id===String(playable[0].id)&&player().playing,deadline);
         return {verified:true,source:'每日推荐',queued:playable.length,skipped:songs.length-playable.length,items:playable.slice(0,5).map(summary),state:observed};
       }
+      if(name==='get_lyric'){
+        const id=String(player().id||state().playing?.resourceTrackId||'');
+        if(!id)throw Error('NO_CURRENT_TRACK');
+        const r=await rawApi('/api/song/lyric/v1')({id,lv:-1,tv:-1,cp:false});
+        const txt=x=>typeof x==='string'?x:String((x&&(x.lyric||x.text))||'');
+        const lrc=r&&(r.lrc||r.lyric),tl=r&&(r.tlyric||r.translation);
+        if(!txt(lrc))throw Error('NO_LYRIC: 该歌曲没有可用歌词 keys='+(r&&typeof r==='object'?JSON.stringify(Object.keys(r)).slice(0,150):typeof r));
+        return {id,name:player().name,lrc:txt(lrc),translation:txt(tl),hasTranslation:!!txt(tl)};
+      }
+      if(name==='like_song'){
+        const cur=state().playing?.curPlaying,res=cur&&(cur.track||cur);
+        const tid=String(res?.id||player().id||'');
+        if(!tid)throw Error('NO_CURRENT_TRACK');
+        const likesOf=()=>{const l=state()['async:hostResource']?.likeTrackIds;return Array.isArray(l)?l.map(String):null;};
+        const before=likesOf();
+        const want=typeof args.like==='boolean'?args.like:(before?!(before.includes(tid)):true);
+        if(before&&before.includes(tid)===want)return {verified:true,liked:want,changed:false,id:tid};
+        dispatch('async:hostResource/setLikeTrack',{isLike:want,resource:res||{id:tid},resourceType:'track'});
+        while(!disposed&&Date.now()<deadline){const now=likesOf();if(now&&(now.includes(tid)===want))return {verified:true,liked:want,changed:true,id:tid};if(!now)break;await delay(150);}
+        return {verified:false,requestedLike:want,id:tid,note:'已发送喜欢操作，但客户端未回读到目标状态'};
+      }
+      if(name==='set_speed'){
+        const s=Number(args.speed);
+        if(!(s>=0.5&&s<=2))throw Error('INVALID_SPEED');
+        const read=()=>Number(state().playing?.playingSpeed||1);
+        if(Math.abs(read()-s)<0.02)return {verified:true,speed:s,changed:false};
+        dispatch('playing/switchPlayingSpeed',{playingSpeed:s});
+        while(!disposed&&Date.now()<deadline){if(Math.abs(read()-s)<0.03)return {verified:true,speed:s,changed:true};await delay(150);}
+        throw Error('NOT_CONFIRMED: 播放速度未切换');
+      }
+      if(name==='set_quality'){
+        const BR={standard:128,exhigh:320,lossless:999,hires:1999,dolby:2999,jyeffect:3999,jymaster:4999,sky:5999,vivid:6999};
+        const br=BR[args.quality];if(!br)throw Error('INVALID_QUALITY');
+        const p0=state().playing||{};
+        if(p0.resourcePlayingQuality===br)return {verified:true,quality:args.quality,bitrate:br,changed:false};
+        dispatch('playing/switchQuality',{quality:{quality:br,type:'song'},current:p0.resourcePlayingQuality,triggerScene:'playingList'});
+        while(!disposed&&Date.now()<deadline){if(state().playing?.resourcePlayingQuality===br)return {verified:true,quality:args.quality,bitrate:br,changed:true};await delay(250);}
+        throw Error('NOT_CONFIRMED: 音质未切换（账号可能没有该音质权限）');
+      }
+      if(name==='blacklist'){
+        const cur=state().playing?.curPlaying,res=cur&&(cur.track||cur);
+        const type=args.type==='artist'?'artist':'song';
+        const id=args.id?String(args.id):String(type==='artist'?(res?.ar?.[0]?.id||res?.artists?.[0]?.id||''):(res?.id||player().id||''));
+        if(!id)throw Error('NO_TARGET_ID');
+        checkDeadline(deadline);
+        const r=await rawApi('/api/music-blacklist/add')({contentType:type,contentIdList:[id]});
+        requireSuccess(r,'BLACKLIST');
+        return {accepted:true,verified:false,type,id,note:'接口已接受请求，尚未回读屏蔽列表确认'};
+      }
+      if(name==='create_playlist'){
+        const uid=state().host?.uid;if(!uid)throw Error('LOGIN_REQUIRED');
+        checkDeadline(deadline);
+        const r=await api.create({uid,name:args.name,privacy:args.private?10:0});
+        requireSuccess(r,'CREATE_PLAYLIST');
+        const id=r.id||r.playlist?.id;
+        if(!id)throw Error('CREATE_NOT_CONFIRMED: 未返回新歌单 ID，不自动重试');
+        checkDeadline(deadline);
+        const d=await api.playlist({id,n:1,s:0});
+        if(!d||(d.code!==undefined&&d.code!==200)||String(d.playlist?.id)!==String(id))throw Error('CREATE_NOT_CONFIRMED');
+        return {verified:true,id:String(id),name:d.playlist.name,private:!!args.private,trackCount:d.playlist.trackCount};
+      }
+      if(name==='add_to_playlist'||name==='remove_from_playlist'){
+        const pid=String(args.playlistId);
+        const op=name==='add_to_playlist'?'add':'del';
+        const ids=[...new Set((args.ids===undefined?[player().id]:args.ids).map(String).filter(Boolean))];
+        if(!ids.length)throw Error('NO_TRACK_ID');
+        const d0=await api.playlist({id:pid,n:1000,s:0});
+        const cur=new Set(playlistIds(d0));
+        const todo=ids.filter(i=>op==='add'?!cur.has(i):cur.has(i));
+        if(!todo.length){const o={verified:true,changed:false,playlistId:pid,trackCount:d0.playlist.trackCount};o[op==='add'?'alreadyIn':'notIn']=ids;return o;}
+        checkDeadline(deadline);
+        const r=await api.manipulate({pid,trackIds:todo,op});
+        requireSuccess(r,op==='add'?'ADD':'REMOVE');
+        checkDeadline(deadline);
+        const d=await api.playlist({id:pid,n:1000,s:0});
+        const has=new Set(playlistIds(d));
+        const bad=todo.filter(i=>op==='add'?!has.has(i):has.has(i));
+        if(bad.length)throw Error((op==='add'?'ADD':'REMOVE')+'_NOT_CONFIRMED: '+bad.join(','));
+        const out={verified:true,playlistId:pid,trackCount:d.playlist.trackCount};
+        out[op==='add'?'added':'removed']=todo;out.skipped=ids.filter(i=>!todo.includes(i));
+        return out;
+      }
+      if(name==='delete_playlist'){
+        const uid=state().host?.uid;if(!uid)throw Error('LOGIN_REQUIRED');
+        const pid=String(args.playlistId);
+        checkDeadline(deadline);
+        const r=await api.del({pid});
+        requireSuccess(r,'DELETE');
+        for(let offset=0;;offset+=1000){
+          checkDeadline(deadline);
+          const mine=await api.mine({uid,limit:1000,offset});
+          if(!mine||(mine.code!==undefined&&mine.code!==200)||!Array.isArray(mine.playlist))throw Error('DELETE_NOT_CONFIRMED: 歌单列表读取失败');
+          if(mine.playlist.some(p=>String(p.id)===pid))throw Error('DELETE_NOT_CONFIRMED');
+          if(mine.more===false||(mine.more===undefined&&mine.playlist.length<1000))break;
+          if(!mine.playlist.length||offset>=99000)throw Error('DELETE_NOT_CONFIRMED: 无法完整读取歌单列表');
+        }
+        return {verified:true,deleted:pid};
+      }
       throw Error('UNKNOWN_TOOL');
     }
     // Access now to ensure the app store has finished initialising.
     player();return {execute,player};
   }
 
-  const TOOL_NAMES=['get_player_state','search_music','list_my_playlists','list_charts','get_queue','play_song','play_playlist','play_daily','enqueue','control_player'];
+  const TOOL_NAMES=["get_player_state","search_music","list_my_playlists","list_charts","play_daily","get_lyric","like_song","set_speed","set_quality","blacklist","create_playlist","add_to_playlist","remove_from_playlist","delete_playlist","play_song","play_playlist","get_queue","enqueue","control_player"];
   const LOG=[];const LOG_MAX=40;let logVer=0;
   const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
   const shortArgs=a=>{try{const s=JSON.stringify(a||{});return(!s||s==='{}')?'':(s.length>46?s.slice(0,46)+'…':s);}catch{return '';}};
   function appTheme(el){try{const m=getComputedStyle(el).color.match(/[\d.]+/g);if(!m)return 'dark';const r=+m[0],g=+m[1],b=+m[2];return(0.299*r+0.587*g+0.114*b)>150?'dark':'light';}catch{return 'dark';}}
   function pushLog(cmd,args,result,level){LOG.unshift({t:new Date().toLocaleTimeString('zh-CN',{hour12:false}),c:cmd+(args?' '+args:''),r:result,lv:level||''});if(LOG.length>LOG_MAX)LOG.pop();logVer++;render();}
   function render(){
+    if(document.hidden)return;
     for(const p of panels){
       if(!p.isConnected){p._miss=(p._miss||0)+1;if(p._miss>20)panels.delete(p);continue;}
       p._miss=0;
-      const th=appTheme(p);if(p.dataset.theme!==th)p.dataset.theme=th;
+      if(!p._themeAt||Date.now()-p._themeAt>=5000){const th=appTheme(p);if(p.dataset.theme!==th)p.dataset.theme=th;p._themeAt=Date.now();}
       const st=p.querySelector('[data-status]'),dot=p.querySelector('[data-dot]'),ep=p.querySelector('[data-ep]'),nv=p.querySelector('[data-ncmv]'),tk=p.querySelector('[data-token]'),body=p.querySelector('[data-log]');
-      if(st)st.textContent=status;
+      if(st&&st.textContent!==status)st.textContent=status;
       if(dot)dot.className='dot '+(/已连接/.test(status)?'ok':/正在连接|正在初始化/.test(status)?'warn':/未连接|失败|尚未/.test(status)?'err':'');
       if(ep)ep.textContent=connection?connection.url.replace(/^ws:\/\//,'').replace(/\/plugin$/,''):'未配对';
       if(nv)nv.textContent=ncmVersion||'—';
@@ -199,19 +332,21 @@
     status='正在连接本地服务';render();
     try{socket=new WebSocket(connection.url);}catch(e){lastError=e.message;retryTimer=setTimeout(connect,3000);return;}
     const current=socket;
-    current.onopen=()=>current.send(JSON.stringify({type:'hello',token:connection.token,version:'0.1.0'}));
+    current.onopen=()=>current.send(JSON.stringify({type:'hello',token:connection.token,version:'0.1.1'}));
     current.onmessage=async(event)=>{
       let msg;try{msg=JSON.parse(event.data);}catch{return;}
+      if(!msg||typeof msg!=='object'||Array.isArray(msg))return;
       if(msg.type==='ready'){status='已连接 · Agent 可控制';lastError='';pushLog('已连接本地服务','','ok','ok');return;}
-      if(msg.type!=='command')return;
+      if(msg.type!=='command'||typeof msg.id!=='string')return;
+      if(active){if(current.readyState===WebSocket.OPEN)current.send(JSON.stringify({type:'result',id:msg.id,error:'BUSY: 上一个命令仍在执行'}));return;}
       let result,error;const started=Date.now();
       try{
-        if(active)throw Error('BUSY');active=true;
+        active=true;
         if(!adapter)adapter=discover();
         lastAction='执行 '+msg.name;render();
         result=await adapter.execute(msg.name,msg.args,msg.deadline);
-        lastAction=msg.name+' · '+(result.verified?'已确认':'已读取');lastError='';
-        pushLog(msg.name,shortArgs(msg.args),result.verified?'verified':'ok · '+(Date.now()-started)+'ms',result.verified?'ok':'');
+        lastAction=msg.name+' · '+(result.verified===false?'结果未确认':result.verified?'已确认':'已读取');lastError='';
+        pushLog(msg.name,shortArgs(msg.args),result.verified===false?'未确认':result.verified?'verified':'ok · '+(Date.now()-started)+'ms',result.verified===false?'warn':result.verified?'ok':'');
       }catch(e){error=e.message;lastError=error;const code=(String(error).split(':')[0]||'ERROR').trim().slice(0,24);pushLog(msg.name,shortArgs(msg.args),code,/TIMEOUT|NOT_CONFIRMED|BUSY/.test(code)?'warn':'err');}
       finally{active=false;render();}
       if(current.readyState===WebSocket.OPEN)current.send(JSON.stringify({type:'result',id:msg.id,...(error?{error}:{result})}));
@@ -265,7 +400,7 @@
     const panel=document.createElement('div');
     panel.className='orpheus';panel.dataset.theme='dark';
     panel.innerHTML=`
-      <div class="brand"><span class="wordmark">ORPHEUS</span><span class="ver">0.1</span></div>
+      <div class="brand"><span class="wordmark">ORPHEUS</span><span class="ver">0.1.1</span></div>
       <p class="sub">任何支持 MCP 的 Agent 都能用它点歌、放歌单、切歌；播放与账号权限由网易云自己处理。</p>
       <section class="card status">
         <span class="dot" data-dot></span>
@@ -280,7 +415,7 @@
         <button class="btn small" data-reconnect>重新连接</button>
       </section>
       <section class="card">
-        <div class="label">可用工具 · ${TOOL_NAMES.length}</div>
+        <div class="label">已注册工具 · ${TOOL_NAMES.length}</div>
         <div class="chips">${TOOL_NAMES.map(n=>'<span class="chip"><i></i>'+n+'</span>').join('')}</div>
       </section>
       <section class="card">
@@ -293,10 +428,10 @@
         <span class="hint">仅本机 127.0.0.1 · 配对令牌鉴权</span>
       </div>
     `;
-    panel.querySelector('[data-reconnect]').onclick=()=>{clearTimeout(retryTimer);if(socket){socket.onclose=null;socket.close();}adapter=null;start();};
+    panel.querySelector('[data-reconnect]').onclick=()=>{clearTimeout(retryTimer);if(socket){socket.onclose=null;socket.close();}start();};
     panel.querySelector('[data-clear]').onclick=()=>{LOG.length=0;logVer++;render();};
     panel.querySelector('[data-copy-token]').onclick=()=>copyText(connection?connection.token:'（未配对）','令牌');
-    panel.querySelector('[data-copy-diag]').onclick=()=>copyText(['Orpheus 0.1 诊断信息','服务地址: '+(connection?connection.url:'未配对'),'网易云版本: '+(ncmVersion||'未知'),'当前状态: '+status,'— 最近命令 —'].concat(LOG.slice(0,10).map(x=>x.t+'  '+x.c+'  →  '+x.r)).join('\n'),'诊断信息');
+    panel.querySelector('[data-copy-diag]').onclick=()=>copyText(['Orpheus 0.1.1 诊断信息','服务地址: '+(connection?connection.url:'未配对'),'网易云版本: '+(ncmVersion||'未知'),'当前状态: '+status,'— 最近命令 —'].concat(LOG.slice(0,10).map(x=>x.t+'  '+x.c+'  →  '+x.r)).join('\n'),'诊断信息');
     panels.add(panel);render();return panel;
   });
   refreshTimer=setInterval(render,1500);

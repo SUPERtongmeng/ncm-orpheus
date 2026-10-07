@@ -16,3 +16,27 @@ test('round trip correlates result and rejects concurrent commands',async t=>{co
 test('timeout is an error, with no queued retry',async t=>{const {bridge,wsurl}=await setup(t,80);await connect(wsurl);await assert.rejects(bridge.execute('control_player',{action:'next'}),/TIMEOUT/);});
 test('disconnect reports unknown outcome',async t=>{const {bridge,wsurl}=await setup(t);const ws=await connect(wsurl);const p=bridge.execute('play_song',{id:'186016'});const rejection=assert.rejects(p,/DISCONNECTED/);ws.close();await rejection;});
 test('schema rejects arbitrary execution and invalid volume / IDs',()=>{assert.throws(()=>validateCommand('eval',{code:'1'}));assert.throws(()=>validateCommand('control_player',{action:'volume',volume:150}));assert.throws(()=>validateCommand('control_player',{action:'volume'}));assert.throws(()=>validateCommand('play_song',{id:'../../etc'}));assert.throws(()=>validateCommand('play_song',{id:'1',code:'evil'}));});
+test('malformed frames close only their socket, before and after authentication',async t=>{
+ const {bridge,wsurl}=await setup(t);
+ for(const authenticated of [false,true])for(const frame of ['null','[]','"hello"','12','{']){
+  const ws=authenticated?await connect(wsurl):new WebSocket(wsurl);
+  if(!authenticated)await once(ws,'open');
+  const closed=once(ws,'close');ws.send(frame);assert.equal((await closed)[0],1008);
+ }
+ const ws=await connect(wsurl);const received=once(ws,'message');const result=bridge.execute('get_player_state',{});
+ const cmd=JSON.parse((await received)[0]);ws.send(JSON.stringify({type:'result',id:cmd.id,result:{connected:true}}));
+ assert.equal((await result).connected,true);
+});
+test('timeout keeps the busy lock until the original command settles',async t=>{
+ const {bridge,wsurl}=await setup(t,80);const ws=await connect(wsurl);
+ const received=once(ws,'message');const p=bridge.execute('get_player_state',{});
+ const rejection=assert.rejects(p,/TIMEOUT/);const cmd=JSON.parse((await received)[0]);await rejection;
+ assert.throws(()=>bridge.execute('get_player_state',{}),/BUSY/);
+ ws.send(JSON.stringify({type:'result',id:'wrong',result:{}}));
+ await new Promise(r=>setTimeout(r,10));assert.throws(()=>bridge.execute('get_player_state',{}),/BUSY/);
+ ws.send(JSON.stringify({type:'result',id:cmd.id,result:{}}));
+ await new Promise(r=>setTimeout(r,10));
+ const next=once(ws,'message');const result=bridge.execute('get_player_state',{});
+ const cmd2=JSON.parse((await next)[0]);ws.send(JSON.stringify({type:'result',id:cmd2.id,result:{connected:true}}));
+ assert.equal((await result).connected,true);
+});

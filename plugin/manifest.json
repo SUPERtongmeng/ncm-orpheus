@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "name": "Orpheus",
   "slug": "orpheus",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": "TongMeng",
   "description": "Orpheus：让 Hermes / GPT Agent 控制网易云播放。",
   "type": "extension",
@@ -10,5 +10,11 @@
   "ncm3-compatible": true,
   "ncm-version-req": ">=3.1.20 <4.0.0",
   "require_restart": false,
-  "injects": { "Main": [{ "file": "main.js" }] }
+  "injects": {
+    "Main": [
+      {
+        "file": "main.js"
+      }
+    ]
+  }
 }

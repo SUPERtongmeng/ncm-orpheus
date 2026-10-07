@@ -1,9 +1,20 @@
 {
   "name": "orpheus",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=20" },
-  "scripts": { "start": "node src/server.js", "mcp": "node src/mcp.js", "test": "node --test" },
-  "dependencies": { "ws": "^8.18.0", "@modelcontextprotocol/sdk": "^1.0.0", "zod": "^3.25.0" }
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "mcp": "node src/mcp.js",
+    "test": "node --test",
+    "sync-tools": "node src/sync-tools.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.25.0"
+  }
 }

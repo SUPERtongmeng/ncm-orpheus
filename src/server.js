@@ -6,15 +6,16 @@ import { getConfig } from './config.js';
 import { validateCommand } from './tools.js';
 
 export function createBridge({token,timeoutMs=25000}) {
-  let peer=null, pending=null, lastSeen=0;
+  let peer=null, pending=null, inFlight=null, lastSeen=0;
   const same=(s)=>typeof s==='string'&&Buffer.byteLength(s)===Buffer.byteLength(token)&&timingSafeEqual(Buffer.from(s),Buffer.from(token));
   const finish=(err,data)=>{if(!pending)return;const p=pending;pending=null;clearTimeout(p.timer);err?p.reject(err):p.resolve(data);};
   function execute(name,args) {
     const validated=validateCommand(name,args);
     if(!peer||peer.readyState!==WebSocket.OPEN)throw Error('PLUGIN_OFFLINE: 请打开网易云并启用 Orpheus');
-    if(pending)throw Error('BUSY: 上一个命令仍在执行');
+    if(inFlight)throw Error('BUSY: 上一个命令仍在执行');
     return new Promise((resolve,reject)=>{
-      const id=randomUUID(),deadline=Date.now()+timeoutMs-1000;
+      const id=randomUUID(),deadline=Date.now()+timeoutMs-Math.min(1000,timeoutMs/10);
+      inFlight=id;
       pending={id,resolve,reject,timer:setTimeout(()=>finish(Error('TIMEOUT: 结果未确认；不要自动重试写操作，请先查询状态')),timeoutMs)};
       peer.send(JSON.stringify({type:'command',id,name,args:validated,deadline}));
     });
@@ -26,7 +27,7 @@ export function createBridge({token,timeoutMs=25000}) {
     // Local tool clients do not need browser CORS. Reject browser-origin requests.
     if(req.headers.origin)return send(403,{error:'ORIGIN_DENIED'});
     if(!same(req.headers.authorization?.replace(/^Bearer /,'')))return send(401,{error:'UNAUTHORIZED'});
-    if(req.url==='/health'&&req.method==='GET')return send(200,{service:'orpheus',version:'0.1.0',pluginConnected:!!peer,lastSeen,busy:!!pending});
+    if(req.url==='/health'&&req.method==='GET')return send(200,{service:'orpheus',version:'0.1.1',pluginConnected:!!peer,lastSeen,busy:!!inFlight});
     if(req.url!=='/command'||req.method!=='POST')return send(404,{error:'NOT_FOUND'});
     try{
       let body='';for await(const chunk of req){body+=chunk;if(Buffer.byteLength(body)>16384)return send(413,{error:'BODY_TOO_LARGE'});}
@@ -48,18 +49,21 @@ export function createBridge({token,timeoutMs=25000}) {
     ws.on('error',()=>{});
     ws.on('message',raw=>{
       let msg;try{msg=JSON.parse(raw);}catch{ws.close(1008,'invalid json');return;}
+      if(!msg||typeof msg!=='object'||Array.isArray(msg)){ws.close(1008,'invalid message');return;}
       if(!authenticated){
         if(msg.type!=='hello'||!same(msg.token)){ws.close(1008,'auth failed');return;}
         if(peer&&peer.readyState===WebSocket.OPEN){ws.close(1013,'already connected');return;}
         clearTimeout(authTimer);authenticated=true;peer=ws;lastSeen=Date.now();ws.send(JSON.stringify({type:'ready'}));return;
       }
       lastSeen=Date.now();
-      if(msg.type==='result'&&pending?.id===msg.id){
+      if(msg.type==='result'&&inFlight===msg.id){
+        if(!Object.hasOwn(msg,'error')&&!Object.hasOwn(msg,'result'))return;
+        inFlight=null;
         if(msg.error)finish(Error(String(msg.error)));else if(Object.hasOwn(msg,'result'))finish(null,msg.result);
       }
     });
     ws.on('pong',()=>{lastSeen=Date.now();});
-    ws.on('close',()=>{clearTimeout(authTimer);if(peer===ws){peer=null;finish(Error('DISCONNECTED: 执行结果未确认，请先查询状态'));}});
+    ws.on('close',()=>{clearTimeout(authTimer);if(peer===ws){peer=null;inFlight=null;finish(Error('DISCONNECTED: 执行结果未确认，请先查询状态'));}});
   });
   const heartbeat=setInterval(()=>{if(peer){if(Date.now()-lastSeen>45000)peer.terminate();else peer.ping();}},15000);
   heartbeat.unref();

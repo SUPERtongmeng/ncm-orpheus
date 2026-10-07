@@ -1,11 +1,13 @@
 import { cpSync,mkdirSync,writeFileSync,existsSync,readFileSync } from 'node:fs';
 import { join,resolve } from 'node:path';
 import { getConfig,root } from './config.js';
+import { syncTools } from './sync-tools.js';
 const base=resolve(process.argv[2]||'C:/betterncm');
 if(!existsSync(join(base,'plugins')))throw Error('请指定现有 BetterNCM 数据目录');
 const target=join(base,'plugins_dev','orpheus');
 if(existsSync(join(target,'manifest.json'))&&JSON.parse(readFileSync(join(target,'manifest.json'),'utf8')).slug!=='orpheus')throw Error('安装目录属于其他插件');
 mkdirSync(target,{recursive:true});
+syncTools();
 for(const file of ['manifest.json','main.js'])cpSync(join(root,'plugin',file),join(target,file));
 const {port,token}=getConfig();
 writeFileSync(join(target,'connection.json'),JSON.stringify({url:`ws://127.0.0.1:${port}/plugin`,token}),{mode:0o600});
