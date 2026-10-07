@@ -1,5 +1,7 @@
 # Orpheus · 网易云 Agent 点歌桥
 
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg) ![Node](https://img.shields.io/badge/Node-%E2%89%A520-339933) ![MCP](https://img.shields.io/badge/MCP-stdio-6e56cf)
+
 让 **Hermes / Codex / 任意支持 MCP 的 Agent** 用自然语言控制本机网易云音乐的播放：点歌、放歌单、查待播队列、暂停/切歌/音量。
 
 插件跑在网易云里（负责真正操作播放器），Agent 只负责理解你的话和选歌，两者通过本机的一个小服务连接。
@@ -140,3 +142,9 @@ npm test        # 7 个测试：鉴权、并发、超时、断线、参数校验
 ---
 
 > 本项目通过运行时探测网易云 3.x 的 webpack 模块来定位其内部接口（搜索、歌曲详情、歌单、播放派发等），因此对客户端小版本更新有一定耐受性；但网易云改版仍可能导致接口失效，此时对应工具会明确报错而非静默失败。
+
+## 许可证
+
+[MIT](LICENSE) © 2026 SUPERtongmeng
+
+仅供个人学习与自用。使用时请遵守网易云音乐的服务条款，不要用于传播版权内容或账号共享。
