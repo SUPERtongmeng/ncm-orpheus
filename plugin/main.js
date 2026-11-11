@@ -103,8 +103,12 @@
       if(!Array.isArray(s.playingList?.curPlayingList))throw Error('UNSUPPORTED_QUEUE');
       return s.playingList.curPlayingList;
     }
+    // 自适应轮询：状态通常 50ms 内就变，前 1 秒用快节奏，之后退回慢节奏省 CPU
+    const POLL_FAST=40,POLL_SLOW=180,POLL_FAST_WINDOW=1000;
+    const pollStep=t0=>Date.now()-t0<POLL_FAST_WINDOW?POLL_FAST:POLL_SLOW;
     async function waitFor(test,deadline){
-      while(Date.now()<deadline&&!disposed){if(test())return player();await delay(180);}
+      const t0=Date.now();
+      while(Date.now()<deadline&&!disposed){if(test())return player();await delay(pollStep(t0));}
       throw Error('NOT_CONFIRMED: 客户端未确认目标状态；可能是版权、网络或接口变化，请查询当前状态');
     }
     async function tracks(ids){
@@ -127,14 +131,21 @@
       if(!Array.isArray(items)||items.some(t=>!t||!t.id)||!Number.isInteger(p.trackCount)||p.trackCount!==items.length)throw Error('INCOMPLETE_PLAYLIST: 无法确认完整歌曲列表');
       return items.map(t=>String(t.id));
     }
+    const SEARCH_CACHE=new Map(),SEARCH_TTL=5*60*1000;
     async function execute(name,args,deadline){
       checkDeadline(deadline);
       if(name==='get_player_state')return {connected:true,pluginVersion:'0.1.1',clientVersion:betterncm.ncm.getNCMVersion(),...player(),capabilities:TOOL_NAMES};
       if(name==='search_music'){
+        const ck=[args.type||'song',args.limit||30,args.query].join('|');
+        const hit=SEARCH_CACHE.get(ck);
+        if(hit&&Date.now()-hit.at<SEARCH_TTL)return hit.data;
         const r=await api.search({s:args.query,type:args.type==='playlist'?1000:1,limit:args.limit,offset:0});
         if(r.code&&r.code!==200)throw Error('SEARCH_FAILED: '+r.code);
         const data=r.result;if(!data)throw Error('BAD_SEARCH_RESPONSE');
-        return {query:args.query,type:args.type,total:args.type==='playlist'?data.playlistCount:data.songCount,items:args.type==='playlist'?(data.playlists||[]).map(playlistSummary):(data.songs||[]).map(summary)};
+        const out={query:args.query,type:args.type,total:args.type==='playlist'?data.playlistCount:data.songCount,items:args.type==='playlist'?(data.playlists||[]).map(playlistSummary):(data.songs||[]).map(summary)};
+        if(SEARCH_CACHE.size>60)SEARCH_CACHE.clear();
+        SEARCH_CACHE.set(ck,{at:Date.now(),data:out});
+        return out;
       }
       if(name==='list_my_playlists'){
         const uid=state().host?.uid;if(!uid)throw Error('LOGIN_REQUIRED');
@@ -246,7 +257,8 @@
         const want=typeof args.like==='boolean'?args.like:(before?!(before.includes(tid)):true);
         if(before&&before.includes(tid)===want)return {verified:true,liked:want,changed:false,id:tid};
         dispatch('async:hostResource/setLikeTrack',{isLike:want,resource:res||{id:tid},resourceType:'track'});
-        while(!disposed&&Date.now()<deadline){const now=likesOf();if(now&&(now.includes(tid)===want))return {verified:true,liked:want,changed:true,id:tid};if(!now)break;await delay(150);}
+        const likeT0=Date.now();
+        while(!disposed&&Date.now()<deadline){const now=likesOf();if(now&&(now.includes(tid)===want))return {verified:true,liked:want,changed:true,id:tid};if(!now)break;await delay(pollStep(likeT0));}
         return {verified:false,requestedLike:want,id:tid,note:'已发送喜欢操作，但客户端未回读到目标状态'};
       }
       if(name==='set_speed'){
@@ -255,7 +267,8 @@
         const read=()=>Number(state().playing?.playingSpeed||1);
         if(Math.abs(read()-s)<0.02)return {verified:true,speed:s,changed:false};
         dispatch('playing/switchPlayingSpeed',{playingSpeed:s});
-        while(!disposed&&Date.now()<deadline){if(Math.abs(read()-s)<0.03)return {verified:true,speed:s,changed:true};await delay(150);}
+        const spdT0=Date.now();
+        while(!disposed&&Date.now()<deadline){if(Math.abs(read()-s)<0.03)return {verified:true,speed:s,changed:true};await delay(pollStep(spdT0));}
         throw Error('NOT_CONFIRMED: 播放速度未切换');
       }
       if(name==='set_quality'){
@@ -264,7 +277,8 @@
         const p0=state().playing||{};
         if(p0.resourcePlayingQuality===br)return {verified:true,quality:args.quality,bitrate:br,changed:false};
         dispatch('playing/switchQuality',{quality:{quality:br,type:'song'},current:p0.resourcePlayingQuality,triggerScene:'playingList'});
-        while(!disposed&&Date.now()<deadline){if(state().playing?.resourcePlayingQuality===br)return {verified:true,quality:args.quality,bitrate:br,changed:true};await delay(250);}
+        const qT0=Date.now();
+        while(!disposed&&Date.now()<deadline){if(state().playing?.resourcePlayingQuality===br)return {verified:true,quality:args.quality,bitrate:br,changed:true};await delay(pollStep(qT0));}
         throw Error('NOT_CONFIRMED: 音质未切换（账号可能没有该音质权限）');
       }
       if(name==='blacklist'){
