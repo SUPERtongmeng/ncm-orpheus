@@ -2,10 +2,10 @@ import http from 'node:http';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
-import { getConfig } from './config.js';
+import { getConfig, setDisabled } from './config.js';
 import { validateCommand } from './tools.js';
 
-export function createBridge({token,timeoutMs=25000}) {
+export function createBridge({token,timeoutMs=25000,onShutdown}) {
   let peer=null, pending=null, inFlight=null, lastSeen=0;
   const same=(s)=>typeof s==='string'&&Buffer.byteLength(s)===Buffer.byteLength(token)&&timingSafeEqual(Buffer.from(s),Buffer.from(token));
   const finish=(err,data)=>{if(!pending)return;const p=pending;pending=null;clearTimeout(p.timer);err?p.reject(err):p.resolve(data);};
@@ -56,6 +56,12 @@ export function createBridge({token,timeoutMs=25000}) {
         clearTimeout(authTimer);authenticated=true;peer=ws;lastSeen=Date.now();ws.send(JSON.stringify({type:'ready'}));return;
       }
       lastSeen=Date.now();
+      // 面板开关关闭网关：回执后安静退出，端口释放
+      if(msg.type==='admin'&&msg.action==='shutdown'){
+        try{ws.send(JSON.stringify({type:'admin-ack',action:'shutdown'}));}catch{}
+        setTimeout(()=>{try{if(onShutdown)onShutdown();}catch{}},150);
+        return;
+      }
       if(msg.type==='result'&&inFlight===msg.id){
         if(!Object.hasOwn(msg,'error')&&!Object.hasOwn(msg,'result'))return;
         inFlight=null;
@@ -70,8 +76,9 @@ export function createBridge({token,timeoutMs=25000}) {
   return {server,execute,close:()=>new Promise(resolve=>{clearInterval(heartbeat);for(const ws of wss.clients)ws.terminate();wss.close();server.close(resolve);})};
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
-  const config=getConfig();const bridge=createBridge(config);
+  const config=getConfig();
+  const bridge=createBridge({...config,onShutdown:async()=>{setDisabled(true);await bridge.close();process.exit(0);}});
   bridge.server.on('error',e=>{console.error(e.code==='EADDRINUSE'?'端口已被占用；服务可能已经运行。':e.message);process.exitCode=1;});
-  bridge.server.listen(config.port,'127.0.0.1',()=>console.error(`Orpheus 已启动：127.0.0.1:${config.port}`));
+  bridge.server.listen(config.port,'127.0.0.1',()=>{setDisabled(false);console.error(`Orpheus 已启动：127.0.0.1:${config.port}`);});
   for(const signal of ['SIGINT','SIGTERM'])process.on(signal,()=>bridge.close().then(()=>process.exit()));
 }

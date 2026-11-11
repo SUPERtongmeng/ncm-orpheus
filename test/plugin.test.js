@@ -93,7 +93,7 @@ test('a rejected concurrent plugin command cannot unlock an active command',asyn
  class WS{static OPEN=1;readyState=1;sent=[];constructor(){socket=this;}send(s){this.sent.push(JSON.parse(s));}close(){}}
  const context={window:{},document:{hidden:false},console,WebSocket:WS,setTimeout,clearTimeout,setInterval:()=>0,clearInterval,
   plugin:{onLoad:fn=>{onLoad=fn;},onConfig:()=>{}},betterncm:{},};
- const injected=source.replace('  plugin.onLoad(()=>{',`  window.testSetup=a=>{adapter=a;connection={url:'ws://127.0.0.1:1/plugin'};connect();};\n  plugin.onLoad(()=>{`);
+ const injected=source.replace('  plugin.onLoad(()=>{',`  window.testSetup=a=>{adapter=a;connection={url:'ws://127.0.0.1:1/plugin'};enabled=true;connect();};\n  plugin.onLoad(()=>{`);
  vm.runInNewContext(injected,context);
  context.window.testSetup({execute:()=>{calls++;return new Promise(r=>{finish=r;});}});
  const message=id=>({data:JSON.stringify({type:'command',id,name:'get_player_state',args:{},deadline:Date.now()+1000})});

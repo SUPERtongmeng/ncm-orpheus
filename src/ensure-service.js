@@ -1,9 +1,10 @@
 import { spawn } from 'node:child_process';
 import { openSync,closeSync } from 'node:fs';
 import { join } from 'node:path';
-import { getConfig,root } from './config.js';
+import { getConfig,root,isDisabled } from './config.js';
 export async function ensureService(){
  const {port,token}=getConfig();
+ if(isDisabled())throw Error('GATEWAY_OFF: 本机网关已在 Orpheus 插件面板关闭，Agent 无法控制网易云。要恢复请在网易云 → BetterNCM → Orpheus 里打开开关');
  async function health(){try{const r=await fetch(`http://127.0.0.1:${port}/health`,{headers:{Authorization:`Bearer ${token}`},signal:AbortSignal.timeout(800)});if(!r.ok)throw Error('端口被其他服务占用或令牌不匹配');const data=await r.json();if(data.service!=='orpheus')throw Error('端口服务不匹配');return data;}catch(e){if(e.message.includes('fetch failed')||e.name==='TimeoutError')return null;throw e;}}
  if(await health())return;
  const log=openSync(join(root,'.local','service.log'),'a');

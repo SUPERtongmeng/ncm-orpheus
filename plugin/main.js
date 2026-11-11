@@ -5,6 +5,26 @@
   if(previous)previous.dispose();
   let disposed=false, socket=null, retryTimer=null, refreshTimer=null, connection=null, adapter=null;
   let status='正在初始化', lastAction='尚未执行命令', lastError='', active=false, ncmVersion='';
+  // 本机网关（127.0.0.1:17632）的开关：以 .local/disabled 标志文件为准
+  const GW_ROOT='C:/Users/m1778/Documents/Codex/2026-10-07/hermes-gpt-agent/outputs/orpheus';
+  const gwFlag=()=>plugin.pluginPath+'/gateway.off';
+  const GW_NODE='C:/Program Files/nodejs/node.exe';
+  const GW_SERVER=GW_ROOT+'/src/server.js';
+  const GW_VBS=GW_ROOT+'/gateway-launcher.vbs';
+  const WSCRIPT='C:/Windows/System32/wscript.exe';
+  const GW_PORT='17632';
+  let enabled=false, watchdogTimer=null;
+  const hostOf=()=>connection?connection.url.replace(/^ws:\/\//,'').replace(/\/plugin$/,''):'127.0.0.1:'+GW_PORT;
+  // 只读：文件存在 = 网关被关过。用 readFileText（与读 connection.json 同一套已验证 API）
+  const readFlag=async()=>{try{return !!(await betterncm.fs.readFileText(gwFlag()));}catch{return false;}};
+  // 启停都交给 wscript（GUI 子系统）→ 不会出现控制台窗口
+  function startGateway(){
+    try{betterncm.app.exec(`${WSCRIPT} //B //Nologo "${GW_VBS}" on`,false,true);return true;}
+    catch(e){lastError='启动网关失败：'+e.message;return false;}
+  }
+  function stopGatewayProcess(){
+    try{betterncm.app.exec(`${WSCRIPT} //B //Nologo "${GW_VBS}" off`,false,true);}catch{}
+  }
   const panels=new Set();
   const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
   const checkDeadline=deadline=>{if(disposed||!Number.isFinite(deadline)||Date.now()>=deadline)throw Error('COMMAND_EXPIRED: 命令已过期，未继续操作');};
@@ -41,6 +61,21 @@
       if(typeof fn!=='function')throw Error('UNSUPPORTED_API_EXPORT: '+path);
       return fn;
     }
+    // 跨模块查接口：先找模块，再从它的导出里挑出源码包含该路径的函数
+    function findEndpoint(path){
+      try{return endpoint(path);}catch{}
+      for(const [mid,fn] of Object.entries(req.m)){
+        let s='';try{s=fn.toString();}catch{continue}
+        if(!s.includes('"'+path+'"'))continue;
+        let ex=null;try{ex=req(+mid);}catch{}
+        if(!ex)continue;
+        for(const k of Object.keys(ex)){
+          let v=null;try{v=ex[k];}catch{continue}
+          if(typeof v==='function'&&v.toString().includes(path))return v;
+        }
+      }
+      throw Error('UNSUPPORTED_API: '+path);
+    }
     const rawCache=new Map();
     function rawApi(path){
       if(rawCache.has(path))return rawCache.get(path);
@@ -55,7 +90,7 @@
     }
 
     const lazyEndpoint=path=>{let fn;return (...args)=>(fn||(fn=endpoint(path)))(...args);};
-    const api={search:lazyEndpoint('/api/cloudsearch/pc'),details:lazyEndpoint('/api/v3/song/detail'),playlist:(...args)=>rawApi('/api/v6/playlist/detail')(...args),mine:(...args)=>rawApi('/api/user/playlist')(...args),charts:lazyEndpoint('/api/toplist/detail/v2'),daily:lazyEndpoint('/api/v3/discovery/recommend/songs'),create:lazyEndpoint('/api/playlist/create'),del:lazyEndpoint('/api/playlist/delete'),manipulate:lazyEndpoint('/api/v1/playlist/manipulate/tracks')};
+    const api={search:lazyEndpoint('/api/cloudsearch/pc'),details:lazyEndpoint('/api/v3/song/detail'),playlist:(...args)=>rawApi('/api/v6/playlist/detail')(...args),mine:(...args)=>rawApi('/api/user/playlist')(...args),charts:lazyEndpoint('/api/toplist/detail/v2'),daily:lazyEndpoint('/api/v3/discovery/recommend/songs'),create:lazyEndpoint('/api/playlist/create'),rename:lazyEndpoint('/api/playlist/update'),del:lazyEndpoint('/api/playlist/delete'),manipulate:lazyEndpoint('/api/v1/playlist/manipulate/tracks')};
     const dispatch=(type,payload={})=>helper.getDispatch()({type,payload});
     function player(){
       const p=state().playing;
@@ -291,13 +326,50 @@
         }
         return {verified:true,deleted:pid};
       }
+      if(name==='rename_playlist'){
+        const pid=String(args.playlistId);
+        const ok=d=>d&&(d.code===undefined||d.code===200)?d.playlist:null;
+        const p0=ok(await api.playlist({id:pid,n:1,s:0}));
+        if(!p0||String(p0.id)!==pid)throw Error('PLAYLIST_NOT_FOUND');
+        const oldName=p0.name||'';
+        if(oldName===args.name)return {verified:true,changed:false,playlistId:pid,name:oldName};
+        checkDeadline(deadline);
+        let rf=null;
+        try{rf=findEndpoint('/api/playlist/update/name');}catch{}
+        if(!rf)throw Error('UNSUPPORTED_API: /api/playlist/update/name');
+        let rerr='';
+        try{await rf({id:pid,name:args.name,tags:Array.isArray(p0.tags)?p0.tags:[],description:p0.description||''});}
+        catch(e){rerr=String((e&&(e.message||e.name||e.errMsg))||e).slice(0,160);}
+        checkDeadline(deadline);
+        const p1=ok(await api.playlist({id:pid,n:1,s:0}));
+        if(!p1||p1.name!==args.name)throw Error('RENAME_NOT_CONFIRMED'+(rerr?': '+rerr:''));
+        return {verified:true,changed:true,playlistId:pid,from:oldName,to:p1.name};
+      }
+      if(name==='edit_playlist'){
+        const pid=String(args.playlistId);
+        const ok=d=>d&&(d.code===undefined||d.code===200)?d.playlist:null;
+        const p0=ok(await api.playlist({id:pid,n:1,s:0}));
+        if(!p0||String(p0.id)!==pid)throw Error('PLAYLIST_NOT_FOUND');
+        const oldDesc=p0.description||'';
+        if(oldDesc===args.description)return {verified:true,changed:false,playlistId:pid,description:oldDesc};
+        let rf=null;
+        try{rf=findEndpoint('/api/playlist/update/name');}catch{}
+        if(!rf)throw Error('UNSUPPORTED_API');
+        let rerr='';
+        try{await rf({id:pid,name:p0.name,tags:Array.isArray(p0.tags)?p0.tags:[],description:args.description});}
+        catch(e){rerr=String((e&&(e.message||e.name||e.errMsg))||e).slice(0,160);}
+        checkDeadline(deadline);
+        const p1=ok(await api.playlist({id:pid,n:1,s:0}));
+        if(!p1||(p1.description||'')!==args.description)throw Error('EDIT_NOT_CONFIRMED'+(rerr?': '+rerr:''));
+        return {verified:true,changed:true,playlistId:pid,from:oldDesc,to:p1.description||''};
+      }
       throw Error('UNKNOWN_TOOL');
     }
     // Access now to ensure the app store has finished initialising.
     player();return {execute,player};
   }
 
-  const TOOL_NAMES=["get_player_state","search_music","list_my_playlists","list_charts","play_daily","get_lyric","like_song","set_speed","set_quality","blacklist","create_playlist","add_to_playlist","remove_from_playlist","delete_playlist","play_song","play_playlist","get_queue","enqueue","control_player"];
+  const TOOL_NAMES=["get_player_state","search_music","list_my_playlists","list_charts","play_daily","get_lyric","like_song","set_speed","set_quality","blacklist","create_playlist","add_to_playlist","remove_from_playlist","delete_playlist","rename_playlist","edit_playlist","play_song","play_playlist","get_queue","enqueue","control_player"];
   const LOG=[];const LOG_MAX=40;let logVer=0;
   const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
   const shortArgs=a=>{try{const s=JSON.stringify(a||{});return(!s||s==='{}')?'':(s.length>46?s.slice(0,46)+'…':s);}catch{return '';}};
@@ -311,7 +383,11 @@
       if(!p._themeAt||Date.now()-p._themeAt>=5000){const th=appTheme(p);if(p.dataset.theme!==th)p.dataset.theme=th;p._themeAt=Date.now();}
       const st=p.querySelector('[data-status]'),dot=p.querySelector('[data-dot]'),ep=p.querySelector('[data-ep]'),nv=p.querySelector('[data-ncmv]'),tk=p.querySelector('[data-token]'),body=p.querySelector('[data-log]');
       if(st&&st.textContent!==status)st.textContent=status;
-      if(dot)dot.className='dot '+(/已连接/.test(status)?'ok':/正在连接|正在初始化/.test(status)?'warn':/未连接|失败|尚未/.test(status)?'err':'');
+      const sw=p.querySelector('[data-enable]');
+      if(sw&&sw.checked!==enabled)sw.checked=enabled;
+      const swl=p.querySelector('[data-enable-label]');
+      if(swl){const t=enabled?'网关已开启':'网关已关闭';if(swl.textContent!==t)swl.textContent=t;}
+      if(dot)dot.className='dot '+(/已连接/.test(status)?'ok':/正在连接|正在初始化|正在启动/.test(status)?'warn':/未连接|失败|尚未|已关闭/.test(status)?'err':'');
       if(ep)ep.textContent=connection?connection.url.replace(/^ws:\/\//,'').replace(/\/plugin$/,''):'未配对';
       if(nv)nv.textContent=ncmVersion||'—';
       if(tk)tk.textContent=connection?'已配对':'未配对';
@@ -325,10 +401,13 @@
       connection=JSON.parse(await blob.text());
       if(!/^ws:\/\/127\.0\.0\.1:\d+\/plugin$/.test(connection.url)||!/^[a-f0-9]{64}$/.test(connection.token))throw Error('连接配置无效');
     }catch(e){status='尚未配对';lastError='请运行项目中的安装脚本，生成本机连接配置。';render();return;}
+    const hasFlag=await Promise.race([readFlag(),delay(1500).then(()=>false)]);
+    if(hasFlag){enabled=false;status='网关已关闭 · '+hostOf();render();return;}
+    enabled=true;
     connect();
   }
   function connect(){
-    if(disposed)return;
+    if(disposed||!enabled)return;
     status='正在连接本地服务';render();
     try{socket=new WebSocket(connection.url);}catch(e){lastError=e.message;retryTimer=setTimeout(connect,3000);return;}
     const current=socket;
@@ -336,7 +415,7 @@
     current.onmessage=async(event)=>{
       let msg;try{msg=JSON.parse(event.data);}catch{return;}
       if(!msg||typeof msg!=='object'||Array.isArray(msg))return;
-      if(msg.type==='ready'){status='已连接 · Agent 可控制';lastError='';pushLog('已连接本地服务','','ok','ok');return;}
+      if(msg.type==='ready'){clearTimeout(watchdogTimer);status='已连接 · Agent 可控制';lastError='';pushLog('已连接本地服务','','ok','ok');return;}
       if(msg.type!=='command'||typeof msg.id!=='string')return;
       if(active){if(current.readyState===WebSocket.OPEN)current.send(JSON.stringify({type:'result',id:msg.id,error:'BUSY: 上一个命令仍在执行'}));return;}
       let result,error;const started=Date.now();
@@ -352,7 +431,35 @@
       if(current.readyState===WebSocket.OPEN)current.send(JSON.stringify({type:'result',id:msg.id,...(error?{error}:{result})}));
     };
     current.onerror=()=>{lastError='本地服务尚未启动，正在自动重连';render();};
-    current.onclose=()=>{if(disposed)return;status='服务未连接';render();retryTimer=setTimeout(connect,3000);};
+    current.onclose=()=>{if(disposed||!enabled)return;status='服务未连接';render();retryTimer=setTimeout(connect,3000);};
+  }
+  async function setGateway(on){
+    on=!!on;if(on===enabled)return;
+    clearTimeout(retryTimer);retryTimer=null;
+    if(on){
+      enabled=true;status='正在启动网关';lastError='';render();
+      try{await betterncm.fs.remove(gwFlag());}catch{}
+      if(!startGateway()){enabled=false;status='网关启动失败';render();return;}
+      pushLog('启动本机网关 '+GW_PORT,'','on','ok');
+      connect();
+      clearTimeout(watchdogTimer);
+      watchdogTimer=setTimeout(()=>{
+        if(disposed||!enabled)return;
+        if(socket&&socket.readyState===WebSocket.OPEN)return;
+        status='网关未响应 · 需手动启动';lastError='内置启动命令没生效，可在终端运行：node '+GW_SERVER;render();
+      },9000);
+      return;
+    }
+    enabled=false;
+    if(socket&&socket.readyState===WebSocket.OPEN){try{socket.send(JSON.stringify({type:'admin',action:'shutdown'}));}catch{}}
+    setTimeout(()=>{
+      if(socket){socket.onclose=null;try{socket.close();}catch{}socket=null;}
+      stopGatewayProcess();
+    },400);
+    try{await betterncm.fs.writeFile(gwFlag(),new Blob(['1']));}catch{}
+    status='网关已关闭 · '+hostOf();lastError='';
+    pushLog('关闭本机网关 '+GW_PORT,'','off','warn');
+    render();
   }
   plugin.onLoad(()=>{setTimeout(()=>{if(!disposed)start();},1500);});
   const PANEL_CSS=`
@@ -377,6 +484,14 @@
 .orpheus .btn{font:inherit;font-size:13px;color:inherit;cursor:pointer;padding:7px 14px;border-radius:10px;border:1px solid var(--border);background:var(--card-hi);transition:background .15s}
 .orpheus .btn:hover{background:rgba(128,128,128,.2)}
 .orpheus .btn.small{padding:4px 10px;font-size:12px;border-radius:8px}
+.orpheus .ctrls{display:flex;flex-direction:column;gap:10px;align-items:flex-end;flex:none;margin-left:auto}
+.orpheus .sw{display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;font-size:12px;color:var(--muted);white-space:nowrap}
+.orpheus .sw input{position:absolute;opacity:0;width:0;height:0}
+.orpheus .sw .track{width:38px;height:22px;border-radius:11px;background:var(--card-hi);border:1px solid var(--border);position:relative;transition:background .18s,border-color .18s;flex:none}
+.orpheus .sw .knob{position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:var(--idle);transition:transform .18s,background .18s}
+.orpheus .sw input:checked+.track{background:rgba(63,185,80,.28);border-color:rgba(63,185,80,.55)}
+.orpheus .sw input:checked+.track .knob{transform:translateX(16px);background:var(--ok)}
+.orpheus .sw input:focus-visible+.track{outline:2px solid var(--ok);outline-offset:2px}
 .orpheus .chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:11px}
 .orpheus .chip{display:inline-flex;align-items:center;gap:7px;padding:5px 11px;border-radius:999px;border:1px solid var(--border);background:var(--card-hi);font-size:12.5px;font-family:ui-monospace,Consolas,monospace;color:var(--muted)}
 .orpheus .chip i{width:6px;height:6px;border-radius:50%;background:var(--idle);flex:none}
@@ -412,7 +527,14 @@
             <span>令牌 <code data-token>—</code></span>
           </div>
         </div>
-        <button class="btn small" data-reconnect>重新连接</button>
+        <div class="ctrls">
+          <label class="sw" title="关闭后释放 127.0.0.1:17632 端口，Agent 完全无法控制">
+            <input type="checkbox" data-enable>
+            <span class="track"><span class="knob"></span></span>
+            <span class="swlabel" data-enable-label>网关已关闭</span>
+          </label>
+          <button class="btn small" data-reconnect>重新连接</button>
+        </div>
       </section>
       <section class="card">
         <div class="label">已注册工具 · ${TOOL_NAMES.length}</div>
@@ -428,12 +550,13 @@
         <span class="hint">仅本机 127.0.0.1 · 配对令牌鉴权</span>
       </div>
     `;
-    panel.querySelector('[data-reconnect]').onclick=()=>{clearTimeout(retryTimer);if(socket){socket.onclose=null;socket.close();}start();};
+    panel.querySelector('[data-enable]').onchange=e=>setGateway(e.target.checked);
+    panel.querySelector('[data-reconnect]').onclick=()=>{if(!enabled){setGateway(true);return;}clearTimeout(retryTimer);if(socket){socket.onclose=null;socket.close();}connect();};
     panel.querySelector('[data-clear]').onclick=()=>{LOG.length=0;logVer++;render();};
     panel.querySelector('[data-copy-token]').onclick=()=>copyText(connection?connection.token:'（未配对）','令牌');
     panel.querySelector('[data-copy-diag]').onclick=()=>copyText(['Orpheus 0.1.1 诊断信息','服务地址: '+(connection?connection.url:'未配对'),'网易云版本: '+(ncmVersion||'未知'),'当前状态: '+status,'— 最近命令 —'].concat(LOG.slice(0,10).map(x=>x.t+'  '+x.c+'  →  '+x.r)).join('\n'),'诊断信息');
     panels.add(panel);render();return panel;
   });
   refreshTimer=setInterval(render,1500);
-  window.__orpheus={dispose(){disposed=true;clearTimeout(retryTimer);clearInterval(refreshTimer);if(socket){socket.onclose=null;socket.close();}panels.clear();}};
+  window.__orpheus={dispose(){disposed=true;clearTimeout(retryTimer);clearTimeout(watchdogTimer);clearInterval(refreshTimer);if(socket){socket.onclose=null;socket.close();}panels.clear();}};
 })();

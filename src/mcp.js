@@ -4,11 +4,12 @@ import { CallToolRequestSchema,ListToolsRequestSchema } from '@modelcontextproto
 import { toolDefinitions,validateCommand } from './tools.js';
 import { callBridge } from './client.js';
 import { ensureService } from './ensure-service.js';
-await ensureService();
+let gatewayError='';
+try{await ensureService();}catch(e){gatewayError=e.message;}
 const server=new Server({name:'orpheus',version:'0.1.1'},{capabilities:{tools:{}}});
 server.setRequestHandler(ListToolsRequestSchema,async()=>({tools:toolDefinitions}));
 server.setRequestHandler(CallToolRequestSchema,async({params})=>{
   try{const result=await callBridge(params.name,validateCommand(params.name,params.arguments));return {content:[{type:'text',text:JSON.stringify(result)}]};}
-  catch(e){return {isError:true,content:[{type:'text',text:e.message}]};}
+  catch(e){const msg=/GATEWAY_OFF/.test(gatewayError)?gatewayError:e.message;return {isError:true,content:[{type:'text',text:msg}]};}
 });
 await server.connect(new StdioServerTransport());
