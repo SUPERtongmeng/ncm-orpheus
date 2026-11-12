@@ -418,6 +418,7 @@
     const hasFlag=await Promise.race([readFlag(),delay(1500).then(()=>false)]);
     if(hasFlag){enabled=false;status='网关已关闭 · '+hostOf();render();return;}
     enabled=true;
+    if(typeof scheduleRefresh==='function')scheduleRefresh();
     connect();
   }
   function connect(){
@@ -576,13 +577,17 @@
     // 定时器 API 缺失时静默降级（测试环境/极端裁剪环境）
     if(typeof clearTimeout==='function')clearTimeout(refreshTimer);
     if(typeof clearInterval==='function')clearInterval(refreshTimer);
-    var gap=enabled?1500:10000;
+    refreshTimer=null;
+    if(!enabled)return;                 // 网关关闭 → 零轮询，改由事件驱动刷新
     if(typeof setTimeout==='function'){
-      refreshTimer=setTimeout(function(){render();scheduleRefresh();},gap);
+      refreshTimer=setTimeout(function(){render();scheduleRefresh();},1500);
     }else if(typeof setInterval==='function'){
-      refreshTimer=setInterval(render,gap);
+      refreshTimer=setInterval(render,1500);
     }
   }
   scheduleRefresh();
+  // 关闭时不轮询，靠这些事件刷新面板
+  try{document.addEventListener('visibilitychange',function(){if(!document.hidden)render();});}catch{}
+  try{window.addEventListener('focus',function(){render();});}catch{}
   window.__orpheus={dispose(){disposed=true;clearTimeout(retryTimer);clearTimeout(watchdogTimer);clearTimeout(refreshTimer);if(socket){socket.onclose=null;socket.close();}panels.clear();}};
 })();
