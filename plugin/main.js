@@ -451,7 +451,7 @@
     on=!!on;if(on===enabled)return;
     clearTimeout(retryTimer);retryTimer=null;
     if(on){
-      enabled=true;status='正在启动网关';lastError='';render();
+      enabled=true;status='正在启动网关';lastError='';render();if(typeof scheduleRefresh==='function')scheduleRefresh();
       try{await betterncm.fs.remove(gwFlag());}catch{}
       if(!startGateway()){enabled=false;status='网关启动失败';render();return;}
       pushLog('启动本机网关 '+GW_PORT,'','on','ok');
@@ -471,7 +471,7 @@
       stopGatewayProcess();
     },400);
     try{await betterncm.fs.writeFile(gwFlag(),new Blob(['1']));}catch{}
-    status='网关已关闭 · '+hostOf();lastError='';
+    status='网关已关闭 · '+hostOf();lastError='';if(typeof scheduleRefresh==='function')scheduleRefresh();
     pushLog('关闭本机网关 '+GW_PORT,'','off','warn');
     render();
   }
@@ -571,6 +571,18 @@
     panel.querySelector('[data-copy-diag]').onclick=()=>copyText(['Orpheus 0.1.1 诊断信息','服务地址: '+(connection?connection.url:'未配对'),'网易云版本: '+(ncmVersion||'未知'),'当前状态: '+status,'— 最近命令 —'].concat(LOG.slice(0,10).map(x=>x.t+'  '+x.c+'  →  '+x.r)).join('\n'),'诊断信息');
     panels.add(panel);render();return panel;
   });
-  refreshTimer=setInterval(render,1500);
-  window.__orpheus={dispose(){disposed=true;clearTimeout(retryTimer);clearTimeout(watchdogTimer);clearInterval(refreshTimer);if(socket){socket.onclose=null;socket.close();}panels.clear();}};
+  // 面板刷新：#开 1.5s，关 10s（关闭后常驻噪音降到 1/7）
+  function scheduleRefresh(){
+    // 定时器 API 缺失时静默降级（测试环境/极端裁剪环境）
+    if(typeof clearTimeout==='function')clearTimeout(refreshTimer);
+    if(typeof clearInterval==='function')clearInterval(refreshTimer);
+    var gap=enabled?1500:10000;
+    if(typeof setTimeout==='function'){
+      refreshTimer=setTimeout(function(){render();scheduleRefresh();},gap);
+    }else if(typeof setInterval==='function'){
+      refreshTimer=setInterval(render,gap);
+    }
+  }
+  scheduleRefresh();
+  window.__orpheus={dispose(){disposed=true;clearTimeout(retryTimer);clearTimeout(watchdogTimer);clearTimeout(refreshTimer);if(socket){socket.onclose=null;socket.close();}panels.clear();}};
 })();
