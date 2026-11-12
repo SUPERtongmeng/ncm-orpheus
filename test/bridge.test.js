@@ -40,3 +40,13 @@ test('timeout keeps the busy lock until the original command settles',async t=>{
  const cmd2=JSON.parse((await next)[0]);ws.send(JSON.stringify({type:'result',id:cmd2.id,result:{connected:true}}));
  assert.equal((await result).connected,true);
 });
+
+test('卡死的插件会被心跳断开，BUSY 锁随之释放',async t=>{
+ const bridge=createBridge({token,timeoutMs:60,heartbeatMs:30,stuckGraceMs:60});
+ bridge.server.listen(0,'127.0.0.1');await once(bridge.server,'listening');t.after(()=>bridge.close());
+ const ws=await connect(`ws://127.0.0.1:${bridge.server.address().port}/plugin`);
+ await assert.rejects(bridge.execute('get_player_state',{}),/TIMEOUT/);
+ assert.throws(()=>bridge.execute('get_player_state',{}),/BUSY/);      // 超时后仍占锁（原语义保留）
+ await once(ws,'close');                                               // 卡死超过宽限期被踢掉
+ assert.throws(()=>bridge.execute('get_player_state',{}),/OFFLINE/);   // 锁已释放，等插件重连
+});

@@ -5,10 +5,10 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { getConfig, setDisabled } from './config.js';
 import { validateCommand } from './tools.js';
 
-export function createBridge({token,timeoutMs=25000,onShutdown}) {
-  let peer=null, pending=null, inFlight=null, lastSeen=0;
+export function createBridge({token,timeoutMs=25000,onShutdown,heartbeatMs=15000,stuckGraceMs=15000}) {
+  let peer=null, pending=null, inFlight=null, lastSeen=0, stuckSince=0;
   const same=(s)=>typeof s==='string'&&Buffer.byteLength(s)===Buffer.byteLength(token)&&timingSafeEqual(Buffer.from(s),Buffer.from(token));
-  const finish=(err,data)=>{if(!pending)return;const p=pending;pending=null;clearTimeout(p.timer);err?p.reject(err):p.resolve(data);};
+  const finish=(err,data)=>{if(!pending)return;const p=pending;pending=null;if(err&&/^TIMEOUT/.test(err.message))stuckSince=Date.now();clearTimeout(p.timer);err?p.reject(err):p.resolve(data);};
   function execute(name,args) {
     const validated=validateCommand(name,args);
     if(!peer||peer.readyState!==WebSocket.OPEN)throw Error('PLUGIN_OFFLINE: 请打开网易云并启用 Orpheus');
@@ -64,14 +64,17 @@ export function createBridge({token,timeoutMs=25000,onShutdown}) {
       }
       if(msg.type==='result'&&inFlight===msg.id){
         if(!Object.hasOwn(msg,'error')&&!Object.hasOwn(msg,'result'))return;
-        inFlight=null;
+        inFlight=null;stuckSince=0;
         if(msg.error)finish(Error(String(msg.error)));else if(Object.hasOwn(msg,'result'))finish(null,msg.result);
       }
     });
     ws.on('pong',()=>{lastSeen=Date.now();});
-    ws.on('close',()=>{clearTimeout(authTimer);if(peer===ws){peer=null;inFlight=null;finish(Error('DISCONNECTED: 执行结果未确认，请先查询状态'));}});
+    ws.on('close',()=>{clearTimeout(authTimer);if(peer===ws){peer=null;inFlight=null;stuckSince=0;finish(Error('DISCONNECTED: 执行结果未确认，请先查询状态'));}});
   });
-  const heartbeat=setInterval(()=>{if(peer){if(Date.now()-lastSeen>45000)peer.terminate();else peer.ping();}},15000);
+  const heartbeat=setInterval(()=>{if(peer){
+    if(stuckSince&&Date.now()-stuckSince>stuckGraceMs){stuckSince=0;peer.terminate();return;}
+    if(Date.now()-lastSeen>45000)peer.terminate();else peer.ping();
+  }},heartbeatMs);
   heartbeat.unref();
   return {server,execute,close:()=>new Promise(resolve=>{clearInterval(heartbeat);for(const ws of wss.clients)ws.terminate();wss.close();server.close(resolve);})};
 }
